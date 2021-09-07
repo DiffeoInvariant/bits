@@ -51,7 +51,8 @@ namespace bits
     using clock_type = ClockType;
     using string_type = std::basic_string<CharType, Traits, StringAllocator>;
     using time_point_type = std::chrono::time_point<ClockType>;
-    using buffer_type = std::vector<std::tuple<string_type, log_level>>;
+    using entry_type = std::tuple<string_type, log_level, time_point_type>;
+    using buffer_type = std::vector<entry_type>;
     using traits_type = Traits;
     using value_type = CharType;
     using allocator_type = Allocator;
@@ -195,9 +196,9 @@ namespace bits
       return m_buffer.crbegin();
     }
 
-    constexpr reverse_iterator crend() noexcept
+    constexpr reverse_iterator rend() noexcept
     {
-      return m_buffer.crend();
+      return m_buffer.rend();
     }
 
     constexpr const_reverse_iterator crend() const noexcept
@@ -241,9 +242,14 @@ namespace bits
       return m_buffer.capacity();
     }
 
-    constexpr string_type new_line() const noexcept
+    static constexpr string_type new_line() noexcept
     {
       return newline();
+    }
+
+    constexpr void clear() const noexcept
+    {
+      m_buffer.clear();
     }
 
     
@@ -336,7 +342,7 @@ namespace bits
       } 
     }
 
-    constexpr string_type newline() const noexcept
+    static constexpr string_type newline() noexcept
     {
       if constexpr (std::is_same<value_type, char>::value) {
 	return "\n";
@@ -407,10 +413,16 @@ namespace bits
 
   public:
 
+    using entry_type = typename Storage::entry_type;
+    using backing_type = Storage;
     using clock_type = ClockType;
+    using size_type = typename Storage::size_type;
     using char_type = CharType;
     using string_type = typename Storage::string_type;
-
+    using iterator = typename Storage::iterator;
+    using const_iterator = typename Storage::const_iterator;
+    using reverse_iterator = typename Storage::reverse_iterator;
+    using const_reverse_iterator = typename Storage::const_reverse_iterator;
     /* the user should never need to set this template parameter themselves
      (or even really know that it exists). It exists solely so that the 
     basic_logger type itself is well-formed (since at most one of these 
@@ -419,34 +431,39 @@ namespace bits
     template<typename T = char_type>
     basic_logger(typename std::enable_if_t<std::is_same_v<T, char>,
 		 OutputStream&> os = std::clog,
-		 log_level level = log_level::NOTSET)
+		 log_level llevel = log_level::NOTSET)
       : m_os{os},
-	m_level{level},
+	m_level{llevel},
 	m_has_ostream{true}
     {}
 
     template<typename T = char_type>
     basic_logger(typename std::enable_if_t<std::is_same_v<T, wchar_t>,
 		 OutputStream&> os = std::wclog,
-		 log_level level = log_level::NOTSET)
+		 log_level llevel = log_level::NOTSET)
       : m_os{os},
-	m_level{level},
+	m_level{llevel},
 	m_has_ostream{true}
     {}
 
     template<typename T>
-    basic_logger(std::optional<OutputStream> os = std::nullopt, log_level level = log_level::NOTSET)
+    basic_logger(std::optional<OutputStream> os = std::nullopt, log_level newlevel = log_level::NOTSET)
     {
       if (os) {
 	m_os = *os;
       }
-      m_level = level;
+      m_level = newlevel;
     }
 
-    basic_logger& set_level(log_level level) noexcept
+    basic_logger& set_level(log_level newlevel) noexcept
     {
-      m_level = level;
+      m_level = newlevel;
       return *this;
+    }
+
+    log_level level() const noexcept
+    {
+      return m_level;
     }
 
     /* if true, will save every entry for later inspection even if less than
@@ -472,7 +489,78 @@ namespace bits
       return *this;
     }
 
+    string_type format_entry(const entry_type& it) {
+      return m_backing.formatted_entry(std::get<0>(it),
+				       std::get<1>(it),
+				       std::get<2>(it));
+    }
+
+    /* iterators do not respect the minimum log level */
+
+    iterator begin() noexcept
+    {
+      return m_backing.begin();
+    }
+    
+    const_iterator begin() const noexcept
+    {
+      return m_backing.begin();
+    }
+    
+    const_iterator cbegin() const noexcept
+    {
+      return m_backing.cbegin();
+    }
+
+    iterator end() noexcept
+    {
+      return m_backing.end();
+    }
+
+    const_iterator end() const noexcept
+    {
+      return m_backing.end();
+    }
+
+    const_iterator cend() const noexcept
+    {
+      return m_backing.cend();
+    }
+    
+    reverse_iterator rbegin() noexcept
+    {
+      return m_backing.rbegin();
+    }
+    
+    const_reverse_iterator rbegin() const noexcept
+    {
+      return m_backing.rbegin();
+    }
+    
+    const_reverse_iterator crbegin() const noexcept
+    {
+      return m_backing.crbegin();
+    }
+
+    reverse_iterator rend() noexcept
+    {
+      return m_backing.rend();
+    }
+
+    const_reverse_iterator crend() const noexcept
+    {
+      return m_backing.crend();
+    }
+
+    
+
   };
+
+  using logger = basic_logger<char>;
+  using wlogger = basic_logger<wchar_t>;
+  using u8logger = basic_logger<char8_t>;
+  using u16logger = basic_logger<char16_t>;
+  using u32logger = basic_logger<char32_t>;
 
 } /* namespace bits */
 #endif /* BITS_LOGGER_H */
