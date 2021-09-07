@@ -1,7 +1,7 @@
 #ifndef BITS_LOGGER_H
 #define BITS_LOGGER_H
 #include <string>
-#include <ostream>
+#include <iostream>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
@@ -10,9 +10,16 @@
 #include <stdexcept>
 #include <utility>
 #include <algorithm>
+#include <vector>
+#include <mutex>
+#include <chrono>
+#include <tuple>
+#include <ctime>
+#include <optional>
 
 namespace bits
 {
+
   enum class log_level : int {
     NOTSET=0,
     DEBUG=10,
@@ -21,32 +28,35 @@ namespace bits
     ERROR=40,
     CRITICAL=50
   };
-    
-  
-  template<class CharType,
-	   class Traits = std::char_traits<CharType>,
-	   class Allocator = std::allocator<CharType>
+
+  template<
+    class CharType,
+    class Traits = std::char_traits<CharType>,
+    class ClockType = std::chrono::system_clock,
+    class DurationType = std::chrono::system_clock::duration,
+    class StringAllocator = std::allocator<CharType>,
+    class Allocator =
+      std::allocator<
+        std::tuple<
+	  std::basic_string<CharType, Traits, StringAllocator>,
+	  log_level,
+	  std::chrono::time_point<ClockType>
+	  >
+      >
 	   >
   class basic_in_memory_storage
   {
-    std::vector<std::pair<
-		  std::basic_string<CharType, Traits, Allocator>,
-		  log_level
-		  >> m_buffer;
-
-    
-    
   public:
 
-    using string_type = std::basic_string<CharType, Traits, Allocator>;
-    using buffer_type = std::vector<std::pair<string_type, log_level>>;
+    using clock_type = ClockType;
+    using string_type = std::basic_string<CharType, Traits, StringAllocator>;
+    using time_point_type = std::chrono::time_point<ClockType>;
+    using buffer_type = std::vector<std::tuple<string_type, log_level>>;
     using traits_type = Traits;
     using value_type = CharType;
     using allocator_type = Allocator;
     using size_type = typename std::allocator_traits<Allocator>::size_type;
     using difference_type = typename std::allocator_traits<Allocator>::difference_type;
-    using reference = value_type&;
-    using const_reference = const value_type&;
     using pointer = typename std::allocator_traits<Allocator>::pointer;
     using const_pointer = typename std::allocator_traits<Allocator>::const_pointer;
     using iterator = typename buffer_type::iterator;
@@ -60,35 +70,53 @@ namespace bits
       : m_buffer{buf_size}
     {}
 
-    basic_in_memory_storage(const basic_in_memory_storage<CharType, Traits, Allocator>&) = default;
-    basic_in_memory_storage(basic_in_memory_storage<CharType, Traits, Allocator> && ) = default;
+    basic_in_memory_storage(const basic_in_memory_storage<CharType, Traits,
+			    ClockType, DurationType, StringAllocator, Allocator>&) = default;
+    basic_in_memory_storage(basic_in_memory_storage<CharType, Traits,
+			    ClockType, DurationType, StringAllocator, Allocator> && ) = default;
 
 
-    constexpr basic_in_memory_storage& write(const string_type& string, log_level level)
+    basic_in_memory_storage& write(const string_type& string, log_level level,
+				   const time_point_type& time)
     {
-      m_buffer.push_back({string, level});
+      m_buffer.push_back({string, level, time});
       return *this;
     }
 
-    constexpr basic_in_memory_storage& write(const value_type *string, log_level level)
+    basic_in_memory_storage& write(const value_type *string, log_level level,
+				   const time_point_type& time)
     {
-      m_buffer.push_back({string_type(string), level});
+      m_buffer.push_back({string_type(string), level, time});
       return *this;
     }
 
-    constexpr string_type read(log_level minlevel = log_level::NOTSET) const noexcept
+    string_type formatted_entry(const string_type& message,
+				log_level level,
+				const time_point_type& time)
+    {
+      return formatted(message, level, time);
+    }
+
+    string_type formatted_entry(const value_type *message,
+				log_level level,
+				const time_point_type& time)
+    {
+      return formatted(string_type(message), level, time);
+    }
+
+    string_type read(log_level minlevel = log_level::NOTSET) const noexcept
     {
       return read(0, minlevel);
     }
 
     /* read from character number `start` to the end */
-    constexpr string_type read(size_type start, log_level minlevel) const
+    string_type read(size_type start, log_level minlevel) const
     {
       return read(start, string_type::npos, minlevel);
     }
 
-    constexpr string_type read(size_type start, size_type nentry,
-			       log_level minlevel) const
+    string_type read(size_type start, size_type nentry,
+		     log_level minlevel) const
     {
       string_type result;
       if (start >= size()) {
@@ -96,13 +124,13 @@ namespace bits
       }
       size_type i=start, N=std::min(size(), start+nentry);
       for(; i<N-1; ++i) {
-	if (m_buffer[i].second >= minlevel) {
-	  result += formatted(m_buffer[i].first, m_buffer[i].second);
+	if (std::get<1>(m_buffer[i]) >= minlevel) {
+	  result += formatted(std::get<0>(m_buffer[i]), std::get<1>(m_buffer[i]), std::get<2>(m_buffer[i]));
 	  result += newline();
 	}
       }
-      if (m_buffer[N-1].second >= minlevel) {
-	result += formatted(m_buffer[N-1].first, m_buffer[N-1].second);
+      if (std::get<1>(m_buffer[N-1]) >= minlevel) {
+	result += formatted(std::get<0>(m_buffer[N-1]), std::get<1>(m_buffer[N-1]), std::get<2>(m_buffer[N-1]));
       }
       return result;
     }
@@ -213,7 +241,20 @@ namespace bits
       return m_buffer.capacity();
     }
 
+    constexpr string_type new_line() const noexcept
+    {
+      return newline();
+    }
+
+    
+
   private:
+    std::vector<std::tuple<
+		  string_type,
+		  log_level,
+		  time_point_type
+		  >
+		> m_buffer;
 
     constexpr string_type level_name(log_level level) const noexcept
     {
@@ -310,18 +351,32 @@ namespace bits
       }
     }
 
-    constexpr string_type formatted(const string_type& val, log_level level) const noexcept
+    virtual string_type formatted(const string_type& val, log_level level, const time_point_type& time) const 
     {
+      char tbuf[100]; /* assume a timestamp is < 100 characters */
+      auto now = ClockType::to_time_t(time);
+      std::tm *now_tm = std::localtime(&now);
+      std::string ctime;
+      if (auto len = strftime(tbuf, sizeof(tbuf), "%A %c", now_tm)) {
+	ctime = std::string{tbuf, len};
+      } else {
+	throw std::runtime_error("strftime failed");
+      }
+      
       if constexpr (std::is_same<value_type, char>::value) {
-	return "(" + val + ", level=" + level_name(level) + ")";
+	return "(" + val + "," + level_name(level) + "," + ctime + ")";
       } else if constexpr (std::is_same<value_type, wchar_t>::value) {
-	return L"(" + val + L", level=" + level_name(level) + L")";
+	return L"(" + val + L"," + level_name(level) + L","
+	  + std::wstring(ctime.begin(), ctime.end()) + L")";
       } else if constexpr (std::is_same<value_type, char8_t>::value) {
-	return u8"(" + val + u8", level=" + level_name(level) + u8")";
+	return u8"(" + val + u8"," + level_name(level) + u8"," +
+	  std::u8string(ctime.begin(), ctime.end()) + u8")";
       } else if constexpr (std::is_same<value_type, char16_t>::value) {
-	return u"(" + val + u", level=" + level_name(level) + u")";
+	return u"(" + val + u"," + level_name(level) +
+	  u"," + std::u16string(ctime.begin(), ctime.end()) + u")";
       } else if constexpr (std::is_same<value_type, char32_t>::value) {
-	return U"(" + val + U", level=" + level_name(level) + U")";
+	return U"(" + val + U"," + level_name(level) + U"," +
+	  std::u32string(ctime.begin(), ctime.end()) + U")";
       } 
     }
     
@@ -334,13 +389,88 @@ namespace bits
   using utf32_in_memory_storage = basic_in_memory_storage<char32_t>;
   
   template<class CharType,
-	   class Storage = basic_in_memory_storage<CharType>
+	   class ClockType = std::chrono::system_clock,
+	   class Storage = basic_in_memory_storage<CharType,
+						   std::char_traits<CharType>,
+						   ClockType,
+						   std::chrono::duration<ClockType>
+						   >,
+	   
+	   class OutputStream = std::basic_ostream<CharType>
 	   >
   class basic_logger
   {
-    log_level level = log_level::NOTSET;
-    Storage backing;
+    log_level m_level = log_level::NOTSET;
+    Storage m_backing;
+    bool         m_has_ostream, m_preserve_all;
+    OutputStream &m_os;
+
+  public:
+
+    using clock_type = ClockType;
+    using char_type = CharType;
+    using string_type = typename Storage::string_type;
+
+    /* the user should never need to set this template parameter themselves
+     (or even really know that it exists). It exists solely so that the 
+    basic_logger type itself is well-formed (since at most one of these 
+					     can be correct for any given
+					     char_type)*/
+    template<typename T = char_type>
+    basic_logger(typename std::enable_if_t<std::is_same_v<T, char>,
+		 OutputStream&> os = std::clog,
+		 log_level level = log_level::NOTSET)
+      : m_os{os},
+	m_level{level},
+	m_has_ostream{true}
+    {}
+
+    template<typename T = char_type>
+    basic_logger(typename std::enable_if_t<std::is_same_v<T, wchar_t>,
+		 OutputStream&> os = std::wclog,
+		 log_level level = log_level::NOTSET)
+      : m_os{os},
+	m_level{level},
+	m_has_ostream{true}
+    {}
+
+    template<typename T>
+    basic_logger(std::optional<OutputStream> os = std::nullopt, log_level level = log_level::NOTSET)
+    {
+      if (os) {
+	m_os = *os;
+      }
+      m_level = level;
+    }
+
+    basic_logger& set_level(log_level level) noexcept
+    {
+      m_level = level;
+      return *this;
+    }
+
+    /* if true, will save every entry for later inspection even if less than
+       the minimum log level */
+    basic_logger& set_persist_all(bool preserve = true)
+    {
+      m_preserve_all = preserve;
+      return *this;
+    }
+
     
+    basic_logger& log(string_type message, log_level level, bool display=true)
+    {
+      if (level < m_level and not m_preserve_all) {
+	return *this;
+      }
+      auto time = clock_type::now();
+      m_backing.write(message, level, time);
+      if (display and level >= m_level) {
+	m_os << m_backing.formatted_entry(message, level, time)
+	     << m_backing.new_line();
+      }
+      return *this;
+    }
 
   };
 
