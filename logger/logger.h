@@ -368,7 +368,7 @@ namespace bits
       auto now = ClockType::to_time_t(time);
       std::tm *now_tm = std::localtime(&now);
       std::string ctime;
-      if (auto len = strftime(tbuf, sizeof(tbuf), "%A %c", now_tm)) {
+      if (auto len = strftime(tbuf, sizeof(tbuf), "%c", now_tm)) {
 	ctime = std::string{tbuf, len};
       } else {
 	throw std::runtime_error("strftime failed");
