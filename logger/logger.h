@@ -16,6 +16,7 @@
 #include <tuple>
 #include <ctime>
 #include <optional>
+#include "source_location.h"
 
 namespace bits
 {
@@ -252,6 +253,10 @@ namespace bits
       m_buffer.clear();
     }
 
+    static constexpr string_type get_level_name(log_level level) noexcept
+    {
+      return level_name(level);
+    }
     
 
   private:
@@ -262,7 +267,7 @@ namespace bits
 		  >
 		> m_buffer;
 
-    constexpr string_type level_name(log_level level) const noexcept
+    static constexpr string_type level_name(log_level level) noexcept
     {
       if constexpr (std::is_same<value_type, char>::value) {
 	switch (level) {
@@ -370,19 +375,18 @@ namespace bits
       }
       
       if constexpr (std::is_same<value_type, char>::value) {
-	return "(" + val + "," + level_name(level) + "," + ctime + ")";
+	return val + " " + ctime;
       } else if constexpr (std::is_same<value_type, wchar_t>::value) {
-	return L"(" + val + L"," + level_name(level) + L","
-	  + std::wstring(ctime.begin(), ctime.end()) + L")";
+	return val + L" "
+	  + std::wstring(ctime.begin(), ctime.end());;
       } else if constexpr (std::is_same<value_type, char8_t>::value) {
-	return u8"(" + val + u8"," + level_name(level) + u8"," +
-	  std::u8string(ctime.begin(), ctime.end()) + u8")";
+	return val + u8" " + 
+	  std::u8string(ctime.begin(), ctime.end());
       } else if constexpr (std::is_same<value_type, char16_t>::value) {
-	return u"(" + val + u"," + level_name(level) +
-	  u"," + std::u16string(ctime.begin(), ctime.end()) + u")";
+	return val + u" " + std::u16string(ctime.begin(), ctime.end());
       } else if constexpr (std::is_same<value_type, char32_t>::value) {
-	return U"(" + val + U"," + level_name(level) + U"," +
-	  std::u32string(ctime.begin(), ctime.end()) + U")";
+	return val + U" " + 
+	  std::u32string(ctime.begin(), ctime.end());
       } 
     }
     
@@ -407,10 +411,28 @@ namespace bits
   class basic_logger
   {
     log_level m_level = log_level::NOTSET;
-    Storage m_backing;
+    /* a shared pointer because we can create sub-loggers that share the same backing
+       (i.e. write to/read from the same log) */
+    std::shared_ptr<Storage> m_backing;
     bool         m_has_ostream, m_preserve_all;
     OutputStream &m_os;
+    typename Storage::string_type m_name;
 
+    /* private ctor to create sub-loggers because the public API for that is
+       the get_sublogger() member function */
+    basic_logger(std::shared_ptr<Storage> backing, bool has_ostream,
+		 bool preserve_all, OutputStream& os, log_level level,
+		 typename Storage::string_type parent_name,
+		 typename Storage::string_type child_name)
+      : m_level{level},
+	m_backing{backing},
+	m_has_ostream{has_ostream},
+	m_preserve_all{preserve_all},
+	m_os{os},
+	m_name{parent_name + typename Storage::string_type(":") + child_name}
+    {}
+	
+		 
   public:
 
     using entry_type = typename Storage::entry_type;
@@ -435,7 +457,9 @@ namespace bits
       : m_os{os},
 	m_level{llevel},
 	m_has_ostream{true}
-    {}
+    {
+      m_backing = std::make_shared<Storage>();
+    }
 
     template<typename T = char_type>
     basic_logger(typename std::enable_if_t<std::is_same_v<T, wchar_t>,
@@ -444,7 +468,9 @@ namespace bits
       : m_os{os},
 	m_level{llevel},
 	m_has_ostream{true}
-    {}
+    {
+      m_backing = std::make_shared<Storage>();
+    }
 
     template<typename T>
     basic_logger(std::optional<OutputStream> os = std::nullopt, log_level newlevel = log_level::NOTSET)
@@ -453,6 +479,12 @@ namespace bits
 	m_os = *os;
       }
       m_level = newlevel;
+    }
+
+    basic_logger& set_name(string_type name) noexcept
+    {
+      m_name = name;
+      return *this;
     }
 
     basic_logger& set_level(log_level newlevel) noexcept
@@ -466,6 +498,10 @@ namespace bits
       return m_level;
     }
 
+    string_type name() const noexcept
+    {
+      return m_name;
+    }
     /* if true, will save every entry for later inspection even if less than
        the minimum log level */
     basic_logger& set_persist_all(bool preserve = true)
@@ -474,23 +510,41 @@ namespace bits
       return *this;
     }
 
+    /* a sublogger shares the same log as its parent and has its name 
+       formatted like ParentName:ChildName */
+    basic_logger get_sublogger(string_type sublogger_name)
+    {
+      return basic_logger(m_backing, m_has_ostream,
+			  m_preserve_all, m_os, m_level,
+			  m_name, sublogger_name);
+    }
+
     
-    basic_logger& log(string_type message, log_level level, bool display=true)
+    basic_logger& log(string_type message, log_level level,
+		      bool display=true,
+		      source_location where = source_location::current())
     {
       if (level < m_level and not m_preserve_all) {
 	return *this;
       }
       auto time = clock_type::now();
-      m_backing.write(message, level, time);
+      string_type prefix = string_type("[") +
+	string_type(where.file_name()) + string_type(":") +
+	string_type(std::to_string(where.line())) + string_type("]") +
+	string_type(" (in function ") + string_type(where.function_name()) +
+	string_type(") ") + m_backing->get_level_name(level) +
+	string_type(":") + m_name + string_type(":");
+      message = prefix + message;
+      m_backing->write(message, level, time);
       if (display and level >= m_level) {
-	m_os << m_backing.formatted_entry(message, level, time)
-	     << m_backing.new_line();
+	m_os << m_backing->formatted_entry(message, level, time)
+	     << m_backing->new_line();
       }
       return *this;
     }
 
     string_type format_entry(const entry_type& it) {
-      return m_backing.formatted_entry(std::get<0>(it),
+      return m_backing->formatted_entry(std::get<0>(it),
 				       std::get<1>(it),
 				       std::get<2>(it));
     }
@@ -499,57 +553,57 @@ namespace bits
 
     iterator begin() noexcept
     {
-      return m_backing.begin();
+      return m_backing->begin();
     }
     
     const_iterator begin() const noexcept
     {
-      return m_backing.begin();
+      return m_backing->begin();
     }
     
     const_iterator cbegin() const noexcept
     {
-      return m_backing.cbegin();
+      return m_backing->cbegin();
     }
 
     iterator end() noexcept
     {
-      return m_backing.end();
+      return m_backing->end();
     }
 
     const_iterator end() const noexcept
     {
-      return m_backing.end();
+      return m_backing->end();
     }
 
     const_iterator cend() const noexcept
     {
-      return m_backing.cend();
+      return m_backing->cend();
     }
     
     reverse_iterator rbegin() noexcept
     {
-      return m_backing.rbegin();
+      return m_backing->rbegin();
     }
     
     const_reverse_iterator rbegin() const noexcept
     {
-      return m_backing.rbegin();
+      return m_backing->rbegin();
     }
     
     const_reverse_iterator crbegin() const noexcept
     {
-      return m_backing.crbegin();
+      return m_backing->crbegin();
     }
 
     reverse_iterator rend() noexcept
     {
-      return m_backing.rend();
+      return m_backing->rend();
     }
 
     const_reverse_iterator crend() const noexcept
     {
-      return m_backing.crend();
+      return m_backing->crend();
     }
 
     
